@@ -31,23 +31,6 @@ static constexpr std::array<std::uint8_t, 23> SDK_GENERIC_SYSCALL_STUB{
     0x4D, 0x89, 0xC2, 0x4D, 0x89, 0xC8, 0x4C, 0x8B, 0x4C, 0x24, 0x08,
 };
 
-static bool IsSdkSyscallStub(const std::vector<std::uint8_t>& code, const std::size_t syscallOffset) {
-    constexpr std::array<std::uint8_t, 3> numberLoad{0x48, 0xC7, 0xC0};
-    constexpr std::array<std::uint8_t, 3> argumentShuffle{0x49, 0x89, 0xCA};
-    if (syscallOffset <= code.size() && syscallOffset >= SDK_GENERIC_SYSCALL_STUB.size() && code.size() - syscallOffset >= 3u) {
-        const auto begin = code.begin() + static_cast<std::ptrdiff_t>(syscallOffset - SDK_GENERIC_SYSCALL_STUB.size());
-        if (std::equal(SDK_GENERIC_SYSCALL_STUB.begin(), SDK_GENERIC_SYSCALL_STUB.end(), begin)
-            && code[syscallOffset] == 0x0F && code[syscallOffset + 1] == 0x05 && code[syscallOffset + 2] == 0xC3)
-            return true;
-    }
-    if (syscallOffset > code.size() || syscallOffset < 10u || code.size() - syscallOffset < 3u)
-        return false;
-    const auto begin = code.begin() + static_cast<std::ptrdiff_t>(syscallOffset - 10u);
-    return std::equal(numberLoad.begin(), numberLoad.end(), begin)
-        && std::equal(argumentShuffle.begin(), argumentShuffle.end(), begin + 7)
-        && code[syscallOffset] == 0x0F && code[syscallOffset + 1] == 0x05 && code[syscallOffset + 2] == 0xC3;
-}
-
 enum class ForbiddenInstruction {
     None,
     Invocation,
@@ -94,6 +77,25 @@ struct RecentInstructions {
         return false;
     }
 };
+
+static bool IsSdkSyscallStub(const std::vector<std::uint8_t>& code, const std::size_t syscallOffset, const std::size_t limit, const RecentInstructions& recent, const FileByteOffset codeOffset) {
+    constexpr std::array<std::uint8_t, 3> numberLoad{0x48, 0xC7, 0xC0};
+    constexpr std::array<std::uint8_t, 3> argumentShuffle{0x49, 0x89, 0xCA};
+    if (syscallOffset <= limit && syscallOffset >= SDK_GENERIC_SYSCALL_STUB.size() && limit - syscallOffset >= 3u) {
+        const auto begin = code.begin() + static_cast<std::ptrdiff_t>(syscallOffset - SDK_GENERIC_SYSCALL_STUB.size());
+        if (std::equal(SDK_GENERIC_SYSCALL_STUB.begin(), SDK_GENERIC_SYSCALL_STUB.end(), begin)
+            && recent.Contains(codeOffset + syscallOffset - SDK_GENERIC_SYSCALL_STUB.size())
+            && code[syscallOffset] == 0x0F && code[syscallOffset + 1] == 0x05 && code[syscallOffset + 2] == 0xC3)
+            return true;
+    }
+    if (syscallOffset > limit || syscallOffset < 10u || limit - syscallOffset < 3u)
+        return false;
+    const auto begin = code.begin() + static_cast<std::ptrdiff_t>(syscallOffset - 10u);
+    return recent.Contains(codeOffset + syscallOffset - 10u)
+        && std::equal(numberLoad.begin(), numberLoad.end(), begin)
+        && std::equal(argumentShuffle.begin(), argumentShuffle.end(), begin + 7)
+        && code[syscallOffset] == 0x0F && code[syscallOffset + 1] == 0x05 && code[syscallOffset + 2] == 0xC3;
+}
 
 template<std::size_t TSize>
 static bool MatchesSdkInlineStub(const std::vector<std::uint8_t>& code, std::size_t syscallOffset, std::size_t limit, const std::array<std::uint8_t, TSize>& pattern, std::size_t beforeSyscall, const RecentInstructions& recent, FileByteOffset codeOffset) {
@@ -291,7 +293,7 @@ std::vector<std::size_t> SyscallScanner::ScanCodeSectionForSyscalls(const std::v
             return;
 
         if (trapSdkStubs && kind == ForbiddenInstruction::Invocation &&
-            (IsSdkSyscallStub(codeSection, opcode) || IsSdkMmanSyscallStub(codeSection, opcode, limit, recent, codeSectionOffset))) {
+            (IsSdkSyscallStub(codeSection, opcode, limit, recent, codeSectionOffset) || IsSdkMmanSyscallStub(codeSection, opcode, limit, recent, codeSectionOffset))) {
             trapped.push_back(opcode);
             std::ostringstream message;
             message << "Trapping SDK syscall instruction at code offset 0x" << std::hex << match.Offset << '\n';

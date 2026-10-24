@@ -74,6 +74,18 @@ void CheckFixtures() {
     Require(Rejected(embedded, true, embedded.size()), "SDK matching accepted a prefix that starts inside an immediate");
     for (const auto& code : std::vector<Bytes>{{0xB8, 0xDD, 0x01, 0x00, 0x00, 0x0F, 0x05, 0xC3}, {0xCD, 0x80}, {0x0F, 0x34}, {0x0F, 0x07}})
         Require(Rejected(code, true, code.size()), "SDK trap mode accepted an unrelated privileged instruction");
+    for (const auto& stub : std::vector<Bytes>{
+             {0x48, 0xC7, 0xC0, 0x09, 0x00, 0x00, 0x00, 0x49, 0x89, 0xCA, 0x0F, 0x05, 0xC3},
+             {0x48, 0x89, 0xF8, 0x48, 0x89, 0xF7, 0x48, 0x89, 0xD6, 0x48, 0x89, 0xCA,
+              0x4D, 0x89, 0xC2, 0x4D, 0x89, 0xC8, 0x4C, 0x8B, 0x4C, 0x24, 0x08, 0x0F, 0x05, 0xC3}}) {
+        const auto trapped = Relinker::MakeSyscallScanner(testProgress, true)->ScanCodeSectionForSyscalls(stub, 0x123400, stub.size());
+        Require(trapped == std::vector<std::size_t>{stub.size() - 3}, "SDK stub returned the wrong patch offset");
+        Require(Rejected(stub, true, stub.size() - 1), "SDK matching read the return beyond the code section");
+        Bytes embeddedStub = {0xB0};
+        embeddedStub.insert(embeddedStub.end(), stub.begin(), stub.end());
+        Require(Rejected(embeddedStub, false, embeddedStub.size()), "embedded SDK stub lost its syscall instruction");
+        Require(Rejected(embeddedStub, true, embeddedStub.size()), "SDK matching accepted a stub starting inside an immediate");
+    }
     bool overflowRejected = false;
     try {
         Relinker::MakeSyscallScanner(testProgress, true)->ScanCodeSectionForSyscalls(Fixtures.front().code, std::numeric_limits<Domain::FileByteOffset>::max(), 1);
