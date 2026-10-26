@@ -46,7 +46,11 @@ namespace {
 
 #ifdef _WIN32
 std::mutex sharedDescriptorAccessMutex;
-std::unordered_map<int, bool> sharedDescriptorAccess;
+struct SharedDescriptorAccess {
+    bool Writable;
+    std::optional<BY_HANDLE_FILE_INFORMATION> AnonymousIdentity;
+};
+std::unordered_map<int, SharedDescriptorAccess> sharedDescriptorAccess;
 
 const std::wstring& WindowsNamedRoot() {
     static const std::wstring root = [] {
@@ -81,15 +85,25 @@ bool IsHostSharedMemoryDescriptor(int descriptor) {
     return std::string_view(objectPath).starts_with("/dev/shm/anyps5-shm-") ||
         std::string_view(objectPath).starts_with("/memfd:anyps5 shm_open");
 #elif defined(_WIN32)
+    std::optional<BY_HANDLE_FILE_INFORMATION> anonymousIdentity;
     {
         std::lock_guard lock(sharedDescriptorAccessMutex);
-        if (!sharedDescriptorAccess.contains(descriptor)) return false;
+        const auto found = sharedDescriptorAccess.find(descriptor);
+        if (found == sharedDescriptorAccess.end()) return false;
+        anonymousIdentity = found->second.AnonymousIdentity;
     }
     const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreDescriptorParameter);
     const auto handleValue = ::_get_osfhandle(descriptor);
     _set_thread_local_invalid_parameter_handler(previous);
     if (handleValue == -1) return false;
     const auto handle = reinterpret_cast<HANDLE>(handleValue);
+    if (anonymousIdentity) {
+        BY_HANDLE_FILE_INFORMATION status{};
+        return ::GetFileInformationByHandle(handle, &status) &&
+            status.dwVolumeSerialNumber == anonymousIdentity->dwVolumeSerialNumber &&
+            status.nFileIndexHigh == anonymousIdentity->nFileIndexHigh &&
+            status.nFileIndexLow == anonymousIdentity->nFileIndexLow;
+    }
     std::vector<wchar_t> pathBuffer(32768);
     const DWORD length = ::GetFinalPathNameByHandleW(handle, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (length == 0 || length >= pathBuffer.size()) return false;
@@ -648,7 +662,24 @@ int CreateAnonymousFile() {
         const int error = _wsopen_s(&descriptor, path.c_str(),
                                     _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY | _O_TEMPORARY | _O_SHORT_LIVED | _O_NOINHERIT,
                                     _SH_DENYNO, _S_IREAD | _S_IWRITE);
-        if (error == 0) return descriptor;
+        if (error == 0) {
+            BY_HANDLE_FILE_INFORMATION identity{};
+            if (!::GetFileInformationByHandle(reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor)), &identity)) {
+                ::_close(descriptor);
+                errno = EIO;
+                return -1;
+            }
+            try {
+                std::lock_guard lock(sharedDescriptorAccessMutex);
+                sharedDescriptorAccess[descriptor] = {true, identity};
+            } catch (...) {
+                const int savedError = errno;
+                ::_close(descriptor);
+                errno = savedError;
+                throw;
+            }
+            return descriptor;
+        }
         if (error != EEXIST) {
             errno = error;
             return -1;
@@ -687,12 +718,12 @@ int SharedMemoryDescriptorWritable_nid_no_patch(int descriptor) {
     if (!IsHostSharedMemoryDescriptor(descriptor)) return -2;
     std::lock_guard lock(sharedDescriptorAccessMutex);
     const auto found = sharedDescriptorAccess.find(descriptor);
-    return found != sharedDescriptorAccess.end() && found->second ? 1 : 0;
+    return found != sharedDescriptorAccess.end() && found->second.Writable ? 1 : 0;
 }
 
 void TrackSharedMemoryDescriptor_nid_no_patch(int descriptor, bool writable) {
     std::lock_guard lock(sharedDescriptorAccessMutex);
-    sharedDescriptorAccess[descriptor] = writable;
+    sharedDescriptorAccess[descriptor] = {writable, std::nullopt};
 }
 
 void ForgetSharedMemoryDescriptor_nid_no_patch(int descriptor) {

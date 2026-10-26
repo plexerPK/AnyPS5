@@ -1,4 +1,5 @@
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libkernel/File/include/SharedMemory.hpp"
 #include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstddef>
@@ -6,6 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 static void Require(bool value) { if (!value) std::abort(); }
 static const char* const anonymous = reinterpret_cast<const char*>(1);
@@ -22,6 +27,43 @@ int main() {
     Require(first >= 0 && second >= 0 && third >= 0);
     Require(first != second && second != third && first != third);
     Require(*__error_nid_postfix() == 13);
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(first));
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(second));
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(third));
+    const int duplicate = dup_nid_postfix(first);
+    Require(duplicate >= 0 && File::IsSharedMemoryDescriptor_nid_no_patch(duplicate));
+    Require(dup2_nid_postfix(first, first) == first);
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(first));
+    Require(dup2_nid_postfix(first, second) == second);
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(second));
+    Require(close_nid_postfix(first) == 0);
+    Require(!File::IsSharedMemoryDescriptor_nid_no_patch(first));
+    Require(dup2_nid_postfix(duplicate, first) == first);
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(first));
+    Require(close_nid_postfix(duplicate) == 0);
+    Require(close_nid_postfix(second) == 0);
+    Require(dup2_nid_postfix(third, second) == second);
+#ifdef _WIN32
+    Require(File::SharedMemoryDescriptorWritable_nid_no_patch(first) == 1);
+    Require(File::SharedMemoryDescriptorWritable_nid_no_patch(second) == 1);
+    const int ordinary = ::_open("NUL", _O_RDWR | _O_BINARY);
+    Require(ordinary >= 0 && !File::IsSharedMemoryDescriptor_nid_no_patch(ordinary));
+    const int replaced = dup_nid_postfix(first);
+    Require(replaced >= 0 && dup2_nid_postfix(ordinary, replaced) == replaced);
+    Require(!File::IsSharedMemoryDescriptor_nid_no_patch(replaced));
+    Require(close_nid_postfix(replaced) == 0);
+    const int reused = dup_nid_postfix(first);
+    Require(reused >= 0 && ::_close(reused) == 0);
+    Require(::_dup2(third, reused) == 0);
+    Require(!File::IsSharedMemoryDescriptor_nid_no_patch(reused));
+    Require(File::SharedMemoryDescriptorWritable_nid_no_patch(reused) == -2);
+    Require(::_dup2(ordinary, reused) == 0);
+    Require(!File::IsSharedMemoryDescriptor_nid_no_patch(reused));
+    Require(File::SharedMemoryDescriptorWritable_nid_no_patch(reused) == -2);
+    Require(dup2_nid_postfix(first, reused) == reused);
+    Require(File::IsSharedMemoryDescriptor_nid_no_patch(reused));
+    Require(close_nid_postfix(reused) == 0 && close_nid_postfix(ordinary) == 0);
+#endif
     Require(ftruncate_nid_postfix(first, 0x4000) == 0);
     const char text[] = "anonymous";
     Require(pwrite_nid_disambig1_nid_postfix(first, text, sizeof(text), 0x1000) == static_cast<std::int64_t>(sizeof(text)));
@@ -31,6 +73,11 @@ int main() {
     char last = 1;
     Require(pread_nid_postfix(first, &last, 1, 0x3fff) == 1 && last == 0);
     Require(pread_nid_postfix(first, &last, 1, 0x4000) == 0);
+    Require(pwrite_nid_disambig1_nid_postfix(first, text, sizeof(text), 0x3fff) == 1);
+    Require(pwrite_nid_disambig1_nid_postfix(first, text, sizeof(text), 0x4000) == 0);
+    Require(pread_nid_postfix(first, &last, 1, 0x4000) == 0);
+    const char zero = 0;
+    Require(pwrite_nid_disambig1_nid_postfix(first, &zero, 1, 0x3fff) == 1);
     Require(pread_nid_postfix(second, back, sizeof(back), 0) == 0);
     auto* view = static_cast<volatile char*>(mmap_nid_postfix(nullptr, 0x4000, 3, 0x1, first, 0));
     Require(view != reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1)));
